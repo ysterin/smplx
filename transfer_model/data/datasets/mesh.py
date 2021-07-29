@@ -31,10 +31,10 @@ from loguru import logger
 
 class MeshFolder(Dataset):
     def __init__(
-        self,
-        data_folder: str,
-        transforms=None,
-        exts: Optional[Tuple] = None
+            self,
+            data_folder: str,
+            transforms=None,
+            exts: Optional[Tuple] = None
     ) -> None:
         ''' Dataset similar to ImageFolder that reads meshes with the same
             topology
@@ -62,10 +62,38 @@ class MeshFolder(Dataset):
 
         # Load the mesh
         mesh = trimesh.load(mesh_path, process=False)
-
-        return {
+        # import pdb; pdb.set_trace()
+        item = {
             'vertices': np.asarray(mesh.vertices, dtype=np.float32),
             'faces': np.asarray(mesh.faces, dtype=np.int32),
             'indices': index,
             'paths': mesh_path,
         }
+
+        # Load SMPL Parameters if they exist
+        file_name = os.path.split(mesh_path)[-1]
+        file_stem = '_'.join(file_name.split('_')[:-1])
+        params_path = os.path.join(self.data_folder, file_stem + '_params.npz')
+        if os.path.exists(params_path):
+            try:
+                params = np.load(params_path, allow_pickle=True)
+                item['betas'] = params.f.betas
+                item['body_pose'] = params.f.body_pose
+                item['global_orient'] = params.f.global_orient
+                # item['transl'] = params.f.transl
+            except KeyError as e:
+                print(e)
+            except Exception as e:
+                print(e)
+
+        return item
+
+
+class MeshParamsFolder(MeshFolder):
+    # def __init__(self, *args, **kwargs):
+    #     super(MeshParamsFolder, self).__init__(*args, **kwargs)
+
+    def __getitem__(self, index):
+        item = super().__getitem__(index)
+
+        return item

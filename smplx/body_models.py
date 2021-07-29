@@ -2325,7 +2325,6 @@ def build_layer(
             ValueError: In case the model type is not one of SMPL, SMPLH,
             SMPLX, MANO or FLAME
     '''
-
     if osp.isdir(model_path):
         model_path = os.path.join(model_path, model_type)
     else:

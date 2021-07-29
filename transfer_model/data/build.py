@@ -28,7 +28,7 @@ def build_dataloader(exp_cfg):
     dset_name = exp_cfg.datasets.name
     if dset_name == 'mesh-folder':
         mesh_folder_cfg = exp_cfg.datasets.mesh_folder
-        logger.info(mesh_folder_cfg.pretty())
+        #logger.info(mesh_folder_cfg.pretty())
         dataset = MeshFolder(**mesh_folder_cfg)
     else:
         raise ValueError(f'Unknown dataset: {dset_name}')

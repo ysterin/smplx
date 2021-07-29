@@ -56,7 +56,7 @@ class OptimConfig:
     type: str = 'trust-ncg'
     lr: float = 1.0
     gtol: float = 1e-8
-    ftol: float = -1.0
+    ftol: float = 0.01
     maxiters: int = 100
 
     lbfgs: LBFGS = LBFGS()

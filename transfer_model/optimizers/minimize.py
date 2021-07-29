@@ -18,9 +18,13 @@ from typing import List, Union, Callable, Optional, Dict
 import torch
 from loguru import logger
 from tqdm import tqdm
-
+from ..utils.timer import Timer, timer_decorator
 from transfer_model.utils import (
     from_torch, Tensor, Array, rel_change)
+
+import os
+import wandb
+os.environ["WANDB_SILENT"] = "true"
 
 
 def minimize(
@@ -33,6 +37,7 @@ def minimize(
     gtol=1e-9,
     interactive=True,
     summary_steps=10,
+    wandb_group=None,
     **kwargs
 ):
     ''' Helper function for running an optimization process
@@ -50,9 +55,12 @@ def minimize(
               If the maximum absolute values of the all gradient tensors
               are less than this, then the process will stop.
     '''
+    # wandb.init(project='smpl2smplx', group=wandb_group)
     prev_loss = None
+    n = 0
     for n in tqdm(range(maxiters), desc='Fitting iterations'):
         loss = optimizer.step(closure)
+        # wandb.log({'loss': loss.item()})
 
         if n > 0 and prev_loss is not None and ftol > 0:
             loss_rel_change = rel_change(prev_loss, loss.item())
@@ -74,6 +82,8 @@ def minimize(
                     logger.info(f'[{n:05d}] {key}: {val:.4f}')
 
         prev_loss = loss.item()
+
+    # wandb.finish()
 
     # Save the final step
     if interactive:

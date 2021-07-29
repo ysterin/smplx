@@ -22,6 +22,7 @@ import pickle
 import numpy as np
 import open3d as o3d
 import torch
+import trimesh
 from loguru import logger
 from tqdm import tqdm
 
@@ -33,9 +34,8 @@ from .transfer_model import run_fitting
 from .utils import read_deformation_transfer, np_mesh_to_o3d
 
 
-def main() -> None:
+def main():
     exp_cfg = parse_args()
-
     device = torch.device('cuda')
     if not torch.cuda.is_available():
         logger.error('CUDA is not available!')
@@ -81,20 +81,37 @@ def main() -> None:
             exp_cfg, batch, body_model, def_matrix, mask_ids)
         paths = batch['paths']
 
+        for key in var_dict:
+            if torch.is_tensor(var_dict[key]):
+                var_dict[key] = var_dict[key].detach().cpu().numpy()
+                if key == 'body_pose':
+                    var_dict[key] = var_dict[key].reshape((len(paths), 1, 21 * 3))
+
         for ii, path in enumerate(paths):
             _, fname = osp.split(path)
+
+            save_dict = {}
+            for key in var_dict:
+                elif key == 'faces':
+                    save_dict[key] = var_dict[key]
+                else:
+                    assert var_dict[key].shape[0] == len(paths)
+                    if key == 'transl' or key == 'global_orient':
+                        save_dict['_' + key] = var_dict[key][ii]
+                    elde:
+                        save_dict[key] = var_dict[key][ii]
+
 
             output_path = osp.join(
                 output_folder, f'{osp.splitext(fname)[0]}.pkl')
             with open(output_path, 'wb') as f:
-                pickle.dump(var_dict, f)
+                pickle.dump(save_dict, f)
 
             output_path = osp.join(
                 output_folder, f'{osp.splitext(fname)[0]}.obj')
-            mesh = np_mesh_to_o3d(
-                var_dict['vertices'][ii], var_dict['faces'])
-            o3d.io.write_triangle_mesh(output_path, mesh)
-
+            mesh = trimesh.Trimesh(vertices=var_dict['vertices'][ii],
+                                   faces=var_dict['faces'])
+            mesh.export(output_path)
 
 if __name__ == '__main__':
     main()

@@ -24,10 +24,10 @@ from tqdm import tqdm
 
 from loguru import logger
 from .utils import get_vertices_per_edge
-
+from .utils.timer import Timer
 from .optimizers import build_optimizer, minimize
 from .utils import (
-    Tensor, batch_rodrigues, apply_deformation_transfer)
+    Tensor, batch_rodrigues, batch_rot2aa, apply_deformation_transfer)
 from .losses import build_loss
 
 
@@ -204,7 +204,8 @@ def build_vertex_closure(
 def get_variables(
     batch_size: int,
     body_model: nn.Module,
-    dtype: torch.dtype = torch.float32
+    dtype: torch.dtype = torch.float32,
+    batch: Dict[str, Tensor] = None
 ) -> Dict[str, Tensor]:
     var_dict = {}
 
@@ -223,6 +224,15 @@ def get_variables(
             'betas': torch.zeros([batch_size, body_model.num_betas],
                                  dtype=dtype, device=device),
         })
+        if batch is not None:
+            if "global_orient" in batch.keys():
+                var_dict["global_orient"] = batch_rot2aa(batch["global_orient"].clone().reshape(-1, 3, 3)).reshape(-1, 3)
+            if "body_pose" in batch.keys():
+                var_dict["body_pose"] = \
+                    batch_rot2aa(batch["body_pose"].clone()[:, :body_model.NUM_BODY_JOINTS].reshape(-1, 3, 3))\
+                    .reshape(batch_size, body_model.NUM_BODY_JOINTS, 3)
+            if "betas" in batch.keys():
+                var_dict["betas"] = batch["betas"].clone()
 
     if body_model.name() == 'SMPL+H' or body_model.name() == 'SMPL-X':
         var_dict.update(
@@ -259,7 +269,8 @@ def run_fitting(
     batch: Dict[str, Tensor],
     body_model: nn.Module,
     def_matrix: Tensor,
-    mask_ids: Optional = None
+    mask_ids: Optional = None,
+    optimize_edges=False,
 ) -> Dict[str, Tensor]:
     ''' Runs fitting
     '''
@@ -272,13 +283,14 @@ def run_fitting(
     interactive = exp_cfg.get('interactive')
 
     # Get the parameters from the model
-    var_dict = get_variables(batch_size, body_model)
+    var_dict = get_variables(batch_size, body_model, batch=batch)
 
     # Build the optimizer object for the current batch
     optim_cfg = exp_cfg.get('optim', {})
 
-    def_vertices = apply_deformation_transfer(def_matrix, vertices, faces)
+    # import pdb; pdb.set_trace()
 
+    def_vertices = apply_deformation_transfer(def_matrix, vertices, faces)
     if mask_ids is None:
         f_sel = np.ones_like(body_model.faces[:, 0], dtype=np.bool_)
     else:
@@ -292,55 +304,76 @@ def run_fitting(
     def log_closure():
         return summary_closure(def_vertices, var_dict, body_model,
                                mask_ids=mask_ids)
+    # import pdb; pdb.set_trace()
+    if optim_cfg.get('maxiters', {}) == 0:
+        param_dict = {}
 
-    edge_fitting_cfg = exp_cfg.get('edge_fitting', {})
-    edge_loss = build_loss(type='vertex-edge', gt_edges=vpe, est_edges=vpe,
-                           **edge_fitting_cfg)
-    edge_loss = edge_loss.to(device=device)
+        for key, var in var_dict.items():
+            # Decode the axis-angles
+            if 'pose' in key or 'orient' in key:
+                param_dict[key] = batch_rodrigues(
+                    var.reshape(-1, 3)).reshape(len(var), -1, 3, 3)
+            else:
+                # Simply pass the variable
+                param_dict[key] = var
 
+        body_model_output = body_model(
+            return_full_pose=True, get_skin=True, **param_dict)
+
+        var_dict.update(body_model_output)
+        var_dict['faces'] = body_model.faces
+        return var_dict
+    if optimize_edges:
+        edge_fitting_cfg = exp_cfg.get('edge_fitting', {})
+        edge_loss = build_loss(type='vertex-edge', gt_edges=vpe, est_edges=vpe,
+                               **edge_fitting_cfg)
+        edge_loss = edge_loss.to(device=device)
     vertex_fitting_cfg = exp_cfg.get('vertex_fitting', {})
     vertex_loss = build_loss(**vertex_fitting_cfg)
     vertex_loss = vertex_loss.to(device=device)
 
-    per_part = edge_fitting_cfg.get('per_part', True)
-    logger.info(f'Per-part: {per_part}')
-    # Optimize edge-based loss to initialize pose
-    if per_part:
-        for key, var in tqdm(var_dict.items(), desc='Parts'):
-            if 'pose' not in key:
-                continue
+    if optimize_edges:
+        per_part = edge_fitting_cfg.get('per_part', True)
+        logger.info(f'Per-part: {per_part}')
+        # Optimize edge-based loss to initialize pose
+        if per_part:
+            for key, var in tqdm(var_dict.items(), desc='Parts'):
+                if 'pose' not in key:
+                    continue
 
-            for jidx in tqdm(range(var.shape[1]), desc='Joints'):
-                part = torch.zeros(
-                    [batch_size, 3], dtype=dtype, device=device,
-                    requires_grad=True)
-                # Build the optimizer for the current part
-                optimizer_dict = build_optimizer([part], optim_cfg)
-                closure = build_edge_closure(
-                    body_model, var_dict, edge_loss, optimizer_dict,
-                    def_vertices, per_part=per_part, part_key=key, jidx=jidx,
-                    part=part)
+                for jidx in tqdm(range(var.shape[1]), desc='Joints'):
+                    part = torch.zeros(
+                        [batch_size, 3], dtype=dtype, device=device,
+                        requires_grad=True)
+                    # Build the optimizer for the current part
+                    optimizer_dict = build_optimizer([part], optim_cfg)
+                    closure = build_edge_closure(
+                        body_model, var_dict, edge_loss, optimizer_dict,
+                        def_vertices, per_part=per_part, part_key=key, jidx=jidx,
+                        part=part)
 
-                minimize(optimizer_dict['optimizer'], closure,
-                         params=[part],
-                         summary_closure=log_closure,
-                         summary_steps=summary_steps,
-                         interactive=interactive,
-                         **optim_cfg)
-                with torch.no_grad():
-                    var[:, jidx] = part
-    else:
-        optimizer_dict = build_optimizer(list(var_dict.values()), optim_cfg)
-        closure = build_edge_closure(
-            body_model, var_dict, edge_loss, optimizer_dict,
-            def_vertices, per_part=per_part)
+                    minimize(optimizer_dict['optimizer'], closure,
+                             params=[part],
+                             summary_closure=log_closure,
+                             summary_steps=summary_steps,
+                             interactive=interactive,
+                             **optim_cfg)
+                    with torch.no_grad():
+                        var[:, jidx] = part
+        else:
+            optimizer_dict = build_optimizer(list(var_dict.values()), optim_cfg)
+            closure = build_edge_closure(
+                body_model, var_dict, edge_loss, optimizer_dict,
+                def_vertices, per_part=per_part)
 
-        minimize(optimizer_dict['optimizer'], closure,
-                 params=var_dict.values(),
-                 summary_closure=log_closure,
-                 summary_steps=summary_steps,
-                 interactive=interactive,
-                 **optim_cfg)
+            # with Timer("optimize_edges", sync=True):
+            minimize(optimizer_dict['optimizer'], closure,
+                     params=var_dict.values(),
+                     summary_closure=log_closure,
+                     summary_steps=summary_steps,
+                     interactive=interactive,
+                     wandb_group="optimize_edges",
+                     **optim_cfg)
 
     if 'translation' in var_dict:
         optimizer_dict = build_optimizer([var_dict['translation']], optim_cfg)
@@ -354,6 +387,7 @@ def run_fitting(
             params_to_opt=[var_dict['translation']],
         )
         # Optimize translation
+        # with Timer("optimize_translation", sync=False):
         minimize(optimizer_dict['optimizer'],
                  closure,
                  params=[var_dict['translation']],
@@ -371,14 +405,18 @@ def run_fitting(
         vertex_loss=vertex_loss,
         per_part=False,
         mask_ids=mask_ids)
+    # with Timer("optimize_vertices", sync=True):
     minimize(optimizer_dict['optimizer'], closure,
              params=list(var_dict.values()),
              summary_closure=log_closure,
              summary_steps=summary_steps,
              interactive=interactive,
+             wandb_group="optimize_vertices",
              **optim_cfg)
 
+    # import pdb; pdb.set_trace()
     param_dict = {}
+
     for key, var in var_dict.items():
         # Decode the axis-angles
         if 'pose' in key or 'orient' in key:
@@ -387,10 +425,11 @@ def run_fitting(
         else:
             # Simply pass the variable
             param_dict[key] = var
-
     body_model_output = body_model(
         return_full_pose=True, get_skin=True, **param_dict)
-    var_dict.update(body_model_output)
+
+    # var_dict.update(body_model_output)
+    var_dict['vertices'] = body_model_output['vertices']
     var_dict['faces'] = body_model.faces
 
     return var_dict
