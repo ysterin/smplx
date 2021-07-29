@@ -10,6 +10,13 @@ __pycache__/
 # C extensions
 *.so
 
+#data etc.
+/**/*.pkl
+/**/*.obj
+transfer_data/
+output*/
+wandb/
+
 # Distribution / packaging
 .Python
 build/
