@@ -15,6 +15,7 @@ __pycache__/
 /**/*.obj
 transfer_data/
 output*/
+wandb/
 profile_output
 
 # Distribution / packaging
